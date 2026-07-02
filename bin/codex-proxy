@@ -1,0 +1,222 @@
+#!/bin/bash
+
+set -euo pipefail
+
+PROGRAM_NAME="codex-proxy"
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
+PROXY_PORT="${PROXY_PORT:-10808}"
+NETWORK_SERVICE="${NETWORK_SERVICE:-}"
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+STATE_DIR="$STATE_HOME/codex-macos-no-tun"
+STATE_FILE="$STATE_DIR/system-proxy-backup.sh"
+
+NETWORKSETUP_BIN="${NETWORKSETUP_BIN:-networksetup}"
+ROUTE_BIN="${ROUTE_BIN:-route}"
+NC_BIN="${NC_BIN:-nc}"
+CURL_BIN="${CURL_BIN:-curl}"
+OPEN_BIN="${OPEN_BIN:-open}"
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+info() {
+  printf '%s\n' "$*"
+}
+
+require_macos() {
+  if [[ "${ALLOW_NON_MACOS_TESTS:-0}" != "1" && "$(uname -s)" != "Darwin" ]]; then
+    die "This tool supports macOS only."
+  fi
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+validate_proxy() {
+  [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] || die "PROXY_PORT must be numeric."
+  (( PROXY_PORT >= 1 && PROXY_PORT <= 65535 )) || die "PROXY_PORT must be between 1 and 65535."
+
+  if [[ "$PROXY_HOST" != "127.0.0.1" && "$PROXY_HOST" != "localhost" && "${ALLOW_REMOTE_PROXY:-0}" != "1" ]]; then
+    die "Refusing a non-loopback proxy. Set ALLOW_REMOTE_PROXY=1 only if you trust it."
+  fi
+}
+
+detect_network_service() {
+  if [[ -n "$NETWORK_SERVICE" ]]; then
+    printf '%s\n' "$NETWORK_SERVICE"
+    return
+  fi
+
+  local interface service
+  interface="$($ROUTE_BIN -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
+  [[ -n "$interface" ]] || die "Could not detect the default network interface. Set NETWORK_SERVICE explicitly."
+
+  service="$($NETWORKSETUP_BIN -listnetworkserviceorder | awk -v device="$interface" '
+    /^\([0-9]+\)/ {
+      current = $0
+      sub(/^\([0-9]+\)[[:space:]]*/, "", current)
+    }
+    index($0, "Device: " device ")") { print current; exit }
+  ')"
+
+  [[ -n "$service" ]] || die "Could not map interface $interface to a network service. Set NETWORK_SERVICE explicitly."
+  printf '%s\n' "$service"
+}
+
+proxy_field() {
+  local kind="$1" service="$2" field="$3"
+  "$NETWORKSETUP_BIN" "-get${kind}webproxy" "$service" | awk -F': ' -v key="$field" '$1 == key { print substr($0, length($1) + 3); exit }'
+}
+
+print_proxy() {
+  local label="$1" kind="$2" service="$3"
+  local enabled server port
+  enabled="$(proxy_field "$kind" "$service" Enabled)"
+  server="$(proxy_field "$kind" "$service" Server)"
+  port="$(proxy_field "$kind" "$service" Port)"
+  printf '%-6s enabled=%-3s server=%s port=%s\n' "$label" "$enabled" "${server:--}" "${port:--}"
+}
+
+save_state() {
+  local service="$1"
+  [[ -e "$STATE_FILE" ]] && return
+
+  mkdir -p "$STATE_DIR"
+  umask 077
+  {
+    printf 'STATE_SERVICE=%q\n' "$service"
+    printf 'WEB_ENABLED=%q\n' "$(proxy_field '' "$service" Enabled)"
+    printf 'WEB_SERVER=%q\n' "$(proxy_field '' "$service" Server)"
+    printf 'WEB_PORT=%q\n' "$(proxy_field '' "$service" Port)"
+    printf 'SECURE_ENABLED=%q\n' "$(proxy_field secure "$service" Enabled)"
+    printf 'SECURE_SERVER=%q\n' "$(proxy_field secure "$service" Server)"
+    printf 'SECURE_PORT=%q\n' "$(proxy_field secure "$service" Port)"
+  } > "$STATE_FILE"
+}
+
+set_proxy_pair() {
+  local service="$1"
+  "$NETWORKSETUP_BIN" -setwebproxy "$service" "$PROXY_HOST" "$PROXY_PORT" off
+  "$NETWORKSETUP_BIN" -setsecurewebproxy "$service" "$PROXY_HOST" "$PROXY_PORT" off
+  "$NETWORKSETUP_BIN" -setwebproxystate "$service" on
+  "$NETWORKSETUP_BIN" -setsecurewebproxystate "$service" on
+}
+
+restore_one() {
+  local service="$1" kind="$2" enabled="$3" server="$4" port="$5"
+  local set_command state_command
+  set_command="-set${kind}webproxy"
+  state_command="-set${kind}webproxystate"
+
+  if [[ -n "$server" && "$port" =~ ^[0-9]+$ && "$port" != "0" ]]; then
+    "$NETWORKSETUP_BIN" "$set_command" "$service" "$server" "$port" off
+  fi
+
+  if [[ "$enabled" == "Yes" ]]; then
+    "$NETWORKSETUP_BIN" "$state_command" "$service" on
+  else
+    "$NETWORKSETUP_BIN" "$state_command" "$service" off
+  fi
+}
+
+command_status() {
+  local service
+  service="$(detect_network_service)"
+  info "Network service: $service"
+  print_proxy HTTP '' "$service"
+  print_proxy HTTPS secure "$service"
+  info "Expected local proxy: http://$PROXY_HOST:$PROXY_PORT"
+}
+
+command_doctor() {
+  local service
+  service="$(detect_network_service)"
+
+  info "Network service: $service"
+  if "$NC_BIN" -z "$PROXY_HOST" "$PROXY_PORT" >/dev/null 2>&1; then
+    info "[ok] Local proxy is listening at $PROXY_HOST:$PROXY_PORT"
+  else
+    die "Nothing is listening at $PROXY_HOST:$PROXY_PORT. Start your proxy client first."
+  fi
+
+  if "$CURL_BIN" --silent --show-error --fail --head --max-time 12 \
+      --proxy "http://$PROXY_HOST:$PROXY_PORT" https://developers.openai.com/ >/dev/null; then
+    info "[ok] OpenAI is reachable through the local proxy"
+  else
+    die "The local proxy is running, but OpenAI is not reachable through it."
+  fi
+
+  print_proxy HTTP '' "$service"
+  print_proxy HTTPS secure "$service"
+}
+
+command_enable() {
+  local service
+  service="$(detect_network_service)"
+
+  "$NC_BIN" -z "$PROXY_HOST" "$PROXY_PORT" >/dev/null 2>&1 || \
+    die "Nothing is listening at $PROXY_HOST:$PROXY_PORT. Start your proxy client first."
+
+  save_state "$service"
+  set_proxy_pair "$service"
+  info "Enabled HTTP and HTTPS system proxy on: $service"
+  info "Proxy: http://$PROXY_HOST:$PROXY_PORT"
+  info "Original settings saved to: $STATE_FILE"
+  info "Quit Codex completely, then open it normally from Dock or Finder."
+}
+
+command_restore() {
+  [[ -r "$STATE_FILE" ]] || die "No backup exists at $STATE_FILE; nothing was changed."
+
+  # shellcheck disable=SC1090
+  source "$STATE_FILE"
+  restore_one "$STATE_SERVICE" '' "$WEB_ENABLED" "$WEB_SERVER" "$WEB_PORT"
+  restore_one "$STATE_SERVICE" secure "$SECURE_ENABLED" "$SECURE_SERVER" "$SECURE_PORT"
+  rm -f "$STATE_FILE"
+  info "Restored the original proxy settings for: $STATE_SERVICE"
+}
+
+command_launch() {
+  command_doctor
+  "$OPEN_BIN" -a Codex
+}
+
+usage() {
+  cat <<'EOF'
+Usage: codex-proxy <command>
+
+Commands:
+  doctor    Check the local proxy and OpenAI connectivity
+  status    Show the current macOS HTTP/HTTPS proxy settings
+  enable    Back up current settings and enable the local system proxy
+  restore   Restore the settings saved by enable
+  launch    Run doctor, then open Codex
+
+Environment overrides:
+  PROXY_HOST=127.0.0.1
+  PROXY_PORT=10808
+  NETWORK_SERVICE="Wi-Fi"
+EOF
+}
+
+main() {
+  require_macos
+  require_command "$NETWORKSETUP_BIN"
+  require_command "$ROUTE_BIN"
+  validate_proxy
+
+  case "${1:-}" in
+    doctor) command_doctor ;;
+    status) command_status ;;
+    enable) command_enable ;;
+    restore) command_restore ;;
+    launch) command_launch ;;
+    -h|--help|help|'') usage ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"
