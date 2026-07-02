@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$ROOT_DIR/bin/codex-proxy" "$INSTALL_DIR/codex-proxy"
+install -m 755 "$ROOT_DIR/codex-proxy" "$INSTALL_DIR/codex-proxy"
 
 printf 'Installed: %s/codex-proxy\n' "$INSTALL_DIR"
 case ":$PATH:" in

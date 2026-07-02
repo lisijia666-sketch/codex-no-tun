@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: bash -n macos/codex-proxy macos/install.sh tests/test-macos.sh
+      - name: Run macOS mock tests
+        run: ./tests/test-macos.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "windows/codex-proxy.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List
+            exit 1
+          }
+      - name: Run read-only status command
+        shell: powershell
+        run: .\windows\codex-proxy.ps1 status

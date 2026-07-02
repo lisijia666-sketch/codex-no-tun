@@ -96,20 +96,20 @@ export NC_BIN="$MOCK_BIN/nc"
 export CURL_BIN="$MOCK_BIN/curl"
 export OPEN_BIN="$MOCK_BIN/open"
 
-"$ROOT_DIR/bin/codex-proxy" doctor >/dev/null
-"$ROOT_DIR/bin/codex-proxy" enable >/dev/null
+"$ROOT_DIR/macos/codex-proxy" doctor >/dev/null
+"$ROOT_DIR/macos/codex-proxy" enable >/dev/null
 
 source "$MOCK_STATE"
 [[ "$WEB_ENABLED" == Yes && "$WEB_SERVER" == 127.0.0.1 && "$WEB_PORT" == 10808 ]]
 [[ "$SECURE_ENABLED" == Yes && "$SECURE_SERVER" == 127.0.0.1 && "$SECURE_PORT" == 10808 ]]
 
-"$ROOT_DIR/bin/codex-proxy" restore >/dev/null
+"$ROOT_DIR/macos/codex-proxy" restore >/dev/null
 
 source "$MOCK_STATE"
 [[ "$WEB_ENABLED" == No && "$WEB_SERVER" == old-http.local && "$WEB_PORT" == 8080 ]]
 [[ "$SECURE_ENABLED" == Yes && "$SECURE_SERVER" == old-https.local && "$SECURE_PORT" == 8443 ]]
 
-if PROXY_HOST=192.168.1.10 "$ROOT_DIR/bin/codex-proxy" status >/dev/null 2>&1; then
+if PROXY_HOST=192.168.1.10 "$ROOT_DIR/macos/codex-proxy" status >/dev/null 2>&1; then
   printf 'Expected non-loopback proxy validation to fail\n' >&2
   exit 1
 fi
